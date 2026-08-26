@@ -1,0 +1,624 @@
+#!/usr/bin/env python3
+"""Data helper for the Omarchy Creators plugin.
+
+Every subcommand prints one JSON document on stdout and exits 0, so the QML
+service never has to reason about exit codes:
+
+    {"schemaVersion":1,"state":"ready","message":"","checkedAt":"...", ...}
+
+`state` is "ready" on success and one of "error", "signed-out",
+"missing-tool", or "no-client-id" when the caller needs to do something about
+it. Everything that can fail per-channel lands in "warnings" instead so one
+dead channel never blanks out the whole check.
+
+Subcommands:
+  youtube catalog          subscribed channels, read from the browser session
+  youtube check            recent uploads for the given channels, via RSS
+  twitch catalog           followed channels, via the Helix API
+  twitch check             which of the given channels are live now
+  twitch login             device-code flow; prints the code to enter
+  twitch login-poll        finish a device-code flow started by `twitch login`
+  twitch logout            forget the stored token
+  browsers                 cookie sources we can read a YouTube session from
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ElementTree
+from concurrent import futures
+
+SCHEMA_VERSION = 1
+TWITCH_SCOPES = "user:read:follows"
+TWITCH_DEVICE_URL = "https://id.twitch.tv/oauth2/device"
+TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
+TWITCH_HELIX = "https://api.twitch.tv/helix/"
+YOUTUBE_FEED = "https://www.youtube.com/feeds/videos.xml?channel_id="
+ATOM = "{http://www.w3.org/2005/Atom}"
+MEDIA = "{http://search.yahoo.com/mrss/}"
+
+XDG_STATE = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+XDG_CACHE = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+STATE_DIR = os.path.join(XDG_STATE, "omarchy", "creators")
+CACHE_DIR = os.path.join(XDG_CACHE, "omarchy", "creators")
+AVATAR_DIR = os.path.join(CACHE_DIR, "avatars")
+TOKEN_PATH = os.path.join(STATE_DIR, "twitch-token.json")
+CATALOG_TTL = 6 * 3600
+
+
+# --------------------------------------------------------------------------
+# output helpers
+# --------------------------------------------------------------------------
+
+def now_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def emit(state="ready", message="", **fields):
+    document = {"schemaVersion": SCHEMA_VERSION, "state": state, "message": message,
+                "checkedAt": now_iso(), "warnings": []}
+    document.update(fields)
+    document.setdefault("warnings", [])
+    json.dump(document, sys.stdout)
+    sys.stdout.write("\n")
+    sys.exit(0)
+
+
+def redact(text):
+    """Never let a token reach the panel, a log, or a notification body."""
+    text = re.sub(r"\b[a-z0-9]{25,}\b", "[REDACTED]", str(text))
+    return re.sub(r"\s+", " ", text).strip()[:240]
+
+
+# --------------------------------------------------------------------------
+# small JSON-file store
+# --------------------------------------------------------------------------
+
+def read_json(path, fallback):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return fallback
+
+
+def write_json(path, payload, private=False):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    if private:
+        os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def seen_state(kind):
+    return read_json(os.path.join(STATE_DIR, "seen-%s.json" % kind), {})
+
+
+def save_seen(kind, payload):
+    write_json(os.path.join(STATE_DIR, "seen-%s.json" % kind), payload)
+
+
+# --------------------------------------------------------------------------
+# http
+# --------------------------------------------------------------------------
+
+def fetch(url, headers=None, data=None, timeout=20, form=False):
+    body = None
+    if data is not None:
+        body = urllib.parse.urlencode(data).encode() if form else json.dumps(data).encode()
+    request = urllib.request.Request(url, data=body, headers=headers or {})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def fetch_json(url, headers=None, data=None, timeout=20, form=False):
+    """Return (payload, error). HTTP errors come back parsed so callers can
+    read Twitch's own message instead of a bare status code."""
+    try:
+        return json.loads(fetch(url, headers, data, timeout, form).decode("utf-8")), None
+    except urllib.error.HTTPError as error:
+        raw = error.read().decode("utf-8", "replace")
+        try:
+            return json.loads(raw), "http %d" % error.code
+        except ValueError:
+            return None, "http %d: %s" % (error.code, redact(raw))
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        return None, redact(error)
+
+
+def cache_avatar(key, url):
+    """Best-effort local copy of a channel avatar, for notification icons."""
+    if not url:
+        return ""
+    if url.startswith("//"):
+        url = "https:" + url
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(key))[:80]
+    path = os.path.join(AVATAR_DIR, safe + ".img")
+    if os.path.exists(path) and time.time() - os.path.getmtime(path) < 30 * 86400:
+        return path
+    try:
+        payload = fetch(url, timeout=10)
+    except Exception:
+        return path if os.path.exists(path) else ""
+    os.makedirs(AVATAR_DIR, exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(payload)
+    return path
+
+
+# --------------------------------------------------------------------------
+# youtube
+# --------------------------------------------------------------------------
+
+FIREFOX_FAMILY = {
+    "zen": ["~/.config/zen", "~/.zen"],
+    "firefox": ["~/.mozilla/firefox", "~/snap/firefox/common/.mozilla/firefox"],
+    "librewolf": ["~/.librewolf"],
+    "floorp": ["~/.floorp"],
+    "waterfox": ["~/.waterfox"],
+}
+CHROMIUM_FAMILY = {
+    "brave": ["~/.config/BraveSoftware/Brave-Browser"],
+    "chrome": ["~/.config/google-chrome"],
+    "chromium": ["~/.config/chromium"],
+    "vivaldi": ["~/.config/vivaldi"],
+    "edge": ["~/.config/microsoft-edge"],
+    "opera": ["~/.config/opera"],
+}
+
+
+def firefox_profiles(root):
+    """Profiles that actually hold cookies, newest first."""
+    found = []
+    if not os.path.isdir(root):
+        return found
+    for entry in sorted(os.listdir(root)):
+        path = os.path.join(root, entry)
+        cookies = os.path.join(path, "cookies.sqlite")
+        if os.path.isfile(cookies):
+            found.append((os.path.getmtime(cookies), path))
+    return [path for _, path in sorted(found, reverse=True)]
+
+
+def discover_browsers():
+    """Every cookie source we could hand to yt-dlp, best candidate first.
+
+    `id` is already a yt-dlp BROWSER:PROFILE spec. yt-dlp only knows a fixed
+    set of browser names, so Firefox forks (Zen, LibreWolf, Floorp) are read as
+    "firefox" pointed at their profile directory, and Chrome forks likewise."""
+    sources = []
+    for name, roots in FIREFOX_FAMILY.items():
+        for root in roots:
+            for profile in firefox_profiles(os.path.expanduser(root)):
+                sources.append({"id": "firefox:" + profile, "browser": name,
+                                "profile": os.path.basename(profile), "kind": "firefox"})
+    for name, roots in CHROMIUM_FAMILY.items():
+        for root in roots:
+            expanded = os.path.expanduser(root)
+            if not os.path.isdir(expanded):
+                continue
+            engine = "chrome" if name in ("chrome", "edge", "opera", "vivaldi") else name
+            for profile in ("Default", "Profile 1", "Profile 2"):
+                path = os.path.join(expanded, profile)
+                if os.path.isfile(os.path.join(path, "Cookies")):
+                    sources.append({"id": "%s:%s" % (engine, path), "browser": name,
+                                    "profile": profile, "kind": "chromium"})
+    return sources
+
+
+def resolve_browser(spec):
+    """"auto" picks the first discovered source; anything else is passed through
+    to yt-dlp untouched so power users keep the full BROWSER[:PROFILE] syntax."""
+    spec = (spec or "auto").strip()
+    if spec and spec != "auto":
+        return spec, None
+    sources = discover_browsers()
+    if not sources:
+        return None, "No browser profile with cookies was found."
+    return sources[0]["id"], None
+
+
+def youtube_catalog(args):
+    if not shutil.which("yt-dlp"):
+        emit("missing-tool", "yt-dlp is not installed or not on PATH.", channels=[])
+
+    cache_path = os.path.join(CACHE_DIR, "youtube-catalog.json")
+    cached = read_json(cache_path, None)
+    if not args.refresh and cached and time.time() - cached.get("fetchedAt", 0) < CATALOG_TTL:
+        emit(channels=cached.get("channels", []), cached=True)
+
+    spec, problem = resolve_browser(args.browser)
+    if problem:
+        emit("signed-out", problem, channels=(cached or {}).get("channels", []))
+
+    command = ["yt-dlp", "--flat-playlist", "--dump-json", "--ignore-no-formats-error",
+               "--no-warnings", "--cookies-from-browser", spec,
+               "https://www.youtube.com/feed/channels"]
+    try:
+        completed = subprocess.run(command, capture_output=True, timeout=args.timeout, text=True)
+    except subprocess.TimeoutExpired:
+        emit("error", "Timed out reading subscriptions from %s." % spec,
+             channels=(cached or {}).get("channels", []))
+
+    channels = []
+    for line in completed.stdout.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        channel_id = entry.get("channel_id") or entry.get("id") or ""
+        if not channel_id.startswith("UC"):
+            continue
+        thumbnails = entry.get("thumbnails") or []
+        channels.append({
+            "id": channel_id,
+            "name": entry.get("channel") or entry.get("title") or channel_id,
+            "handle": entry.get("uploader_id") or "",
+            "url": entry.get("channel_url") or "https://www.youtube.com/channel/" + channel_id,
+            "avatar": (thumbnails[-1].get("url") if thumbnails else ""),
+            "subscribers": entry.get("channel_follower_count") or 0,
+        })
+
+    if not channels:
+        detail = redact(completed.stderr) or "No subscriptions came back."
+        signed_out = "cookies" in detail.lower() or "sign in" in detail.lower()
+        emit("signed-out" if signed_out else "error",
+             "Could not read subscriptions from %s. %s" % (spec, detail),
+             channels=(cached or {}).get("channels", []))
+
+    channels.sort(key=lambda item: item["name"].lower())
+    write_json(cache_path, {"fetchedAt": time.time(), "channels": channels})
+    emit(channels=channels, cached=False, browser=spec)
+
+
+def parse_feed(xml_bytes, channel_id):
+    root = ElementTree.fromstring(xml_bytes)
+    author = root.findtext(ATOM + "title") or ""
+    videos = []
+    for entry in root.findall(ATOM + "entry"):
+        video_id = entry.findtext("{http://www.youtube.com/xml/schemas/2015}videoId") or ""
+        if not video_id:
+            continue
+        group = entry.find(MEDIA + "group")
+        thumbnail = ""
+        if group is not None:
+            node = group.find(MEDIA + "thumbnail")
+            thumbnail = node.get("url", "") if node is not None else ""
+        videos.append({
+            "id": video_id,
+            "kind": "youtube",
+            "channelId": channel_id,
+            "channelName": (entry.findtext(ATOM + "author/" + ATOM + "name") or author),
+            "title": entry.findtext(ATOM + "title") or "Untitled",
+            "url": "https://www.youtube.com/watch?v=" + video_id,
+            "publishedAt": entry.findtext(ATOM + "published") or "",
+            "thumbnail": thumbnail,
+        })
+    return videos
+
+
+def youtube_check(args):
+    """Recent uploads per channel. A channel we have never seen is baselined
+    silently, so enabling a channel never fires a burst of old videos."""
+    state = seen_state("youtube")
+    warnings, items, fresh = [], [], []
+
+    wanted = []
+    for channel_id in args.channel:
+        if re.match(r"^UC[A-Za-z0-9_-]{20,}$", channel_id):
+            wanted.append(channel_id)
+        else:
+            warnings.append("%s: not a channel id" % channel_id)
+
+    def pull(channel_id):
+        try:
+            payload = fetch(YOUTUBE_FEED + urllib.parse.quote(channel_id), timeout=30)
+            return channel_id, parse_feed(payload, channel_id), None
+        except Exception as error:
+            return channel_id, [], redact(error)
+
+    # One feed per channel, so fetch a batch at a time or a long enabled list
+    # would take minutes of round-trips.
+    with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+        results = list(pool.map(pull, wanted))
+
+    for channel_id, videos, error in results:
+        if error:
+            warnings.append("%s: %s" % (channel_id, error))
+            continue
+
+        items.extend(videos)
+        known = state.get(channel_id)
+        ids = [video["id"] for video in videos[:args.keep]]
+        if known is None:
+            state[channel_id] = {"ids": ids, "at": now_iso()}
+            continue
+        previous = set(known.get("ids") or [])
+        for video in videos:
+            if video["id"] not in previous:
+                fresh.append(video)
+        state[channel_id] = {"ids": ids, "at": now_iso()}
+
+    for video in fresh:
+        video["avatar"] = cache_avatar("yt-" + video["channelId"], video.get("thumbnail"))
+
+    items.sort(key=lambda video: video.get("publishedAt", ""), reverse=True)
+    fresh.sort(key=lambda video: video.get("publishedAt", ""), reverse=True)
+    if args.commit:
+        save_seen("youtube", state)
+    emit(items=items[:args.limit], fresh=fresh, warnings=warnings)
+
+
+# --------------------------------------------------------------------------
+# twitch
+# --------------------------------------------------------------------------
+
+def load_token():
+    return read_json(TOKEN_PATH, {})
+
+
+def twitch_headers(args):
+    """Returns (headers, token_record, problem)."""
+    if not args.client_id:
+        return None, None, ("no-client-id", "Set a Twitch Client ID in the plugin settings.")
+    record = load_token()
+    token = record.get("accessToken")
+    if not token:
+        return None, None, ("signed-out", "Connect your Twitch account to load follows.")
+    if record.get("expiresAt", 0) and record["expiresAt"] - time.time() < 600:
+        refreshed = refresh_token(args.client_id, record.get("refreshToken"))
+        if refreshed:
+            record = refreshed
+            token = record["accessToken"]
+        else:
+            return None, None, ("signed-out", "Twitch session expired. Connect again.")
+    return ({"Client-Id": args.client_id, "Authorization": "Bearer " + token},
+            record, None)
+
+
+def refresh_token(client_id, refresh):
+    if not refresh:
+        return None
+    payload, error = fetch_json(TWITCH_TOKEN_URL, data={
+        "client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh,
+    }, form=True)
+    if error or not payload or "access_token" not in payload:
+        return None
+    record = {
+        "accessToken": payload["access_token"],
+        "refreshToken": payload.get("refresh_token", refresh),
+        "expiresAt": time.time() + int(payload.get("expires_in", 3600)),
+    }
+    write_json(TOKEN_PATH, record, private=True)
+    return record
+
+
+def helix(headers, path, params):
+    url = TWITCH_HELIX + path + "?" + urllib.parse.urlencode(params, doseq=True)
+    return fetch_json(url, headers=headers)
+
+
+def twitch_login(args):
+    """Start the device-code flow. The plugin shows the code; the browser opens
+    to twitch.tv/activate. No redirect URI and no client secret involved."""
+    if not args.client_id:
+        emit("no-client-id", "Set a Twitch Client ID in the plugin settings.")
+    payload, error = fetch_json(TWITCH_DEVICE_URL, data={
+        "client_id": args.client_id, "scopes": TWITCH_SCOPES,
+    }, form=True)
+    if error or not payload or "device_code" not in payload:
+        emit("error", "Twitch would not start the sign-in: %s" %
+             ((payload or {}).get("message") or error or "unknown"))
+    write_json(os.path.join(STATE_DIR, "twitch-device.json"), {
+        "deviceCode": payload["device_code"],
+        "interval": payload.get("interval", 5),
+        "expiresAt": time.time() + int(payload.get("expires_in", 1800)),
+    }, private=True)
+    emit(userCode=payload.get("user_code", ""),
+         verificationUri=payload.get("verification_uri") or "https://www.twitch.tv/activate",
+         expiresIn=int(payload.get("expires_in", 1800)))
+
+
+def twitch_login_poll(args):
+    pending_path = os.path.join(STATE_DIR, "twitch-device.json")
+    pending = read_json(pending_path, {})
+    if not pending.get("deviceCode"):
+        emit("error", "No sign-in is in progress.")
+    if time.time() > pending.get("expiresAt", 0):
+        emit("error", "The sign-in code expired. Start again.")
+
+    payload, error = fetch_json(TWITCH_TOKEN_URL, data={
+        "client_id": args.client_id, "device_code": pending["deviceCode"],
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code", "scopes": TWITCH_SCOPES,
+    }, form=True)
+    if payload and "access_token" in payload:
+        write_json(TOKEN_PATH, {
+            "accessToken": payload["access_token"],
+            "refreshToken": payload.get("refresh_token", ""),
+            "expiresAt": time.time() + int(payload.get("expires_in", 3600)),
+        }, private=True)
+        try:
+            os.remove(pending_path)
+        except OSError:
+            pass
+        emit(authorized=True)
+    detail = (payload or {}).get("message", "") or error or ""
+    if "authorization_pending" in detail or "pending" in detail.lower():
+        emit(authorized=False, message="Waiting for you to approve in the browser.")
+    emit("error", "Twitch declined the sign-in: %s" % (detail or "unknown"), authorized=False)
+
+
+def twitch_logout(args):
+    for path in (TOKEN_PATH, os.path.join(STATE_DIR, "twitch-device.json")):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    emit(message="Disconnected from Twitch.")
+
+
+def twitch_catalog(args):
+    headers, record, problem = twitch_headers(args)
+    if problem:
+        emit(problem[0], problem[1], channels=[])
+
+    users, error = helix(headers, "users", {})
+    if error or not (users or {}).get("data"):
+        emit("signed-out", "Twitch did not recognise the session. Connect again.", channels=[])
+    user_id = users["data"][0]["id"]
+
+    follows, cursor, guard = [], "", 0
+    while guard < 40:
+        guard += 1
+        params = {"user_id": user_id, "first": 100}
+        if cursor:
+            params["after"] = cursor
+        payload, error = helix(headers, "channels/followed", params)
+        if error:
+            emit("error", "Could not load follows: %s" %
+                 ((payload or {}).get("message") or error), channels=[])
+        follows.extend(payload.get("data") or [])
+        cursor = (payload.get("pagination") or {}).get("cursor") or ""
+        if not cursor:
+            break
+
+    logins = [item.get("broadcaster_login", "") for item in follows]
+    avatars = twitch_avatars(headers, logins)
+    channels = [{
+        "id": item.get("broadcaster_id", ""),
+        "login": item.get("broadcaster_login", ""),
+        "name": item.get("broadcaster_name") or item.get("broadcaster_login", ""),
+        "url": "https://www.twitch.tv/" + item.get("broadcaster_login", ""),
+        "avatar": avatars.get(item.get("broadcaster_login", ""), ""),
+        "followedAt": item.get("followed_at", ""),
+    } for item in follows if item.get("broadcaster_login")]
+    channels.sort(key=lambda item: item["name"].lower())
+    write_json(os.path.join(CACHE_DIR, "twitch-catalog.json"),
+               {"fetchedAt": time.time(), "channels": channels})
+    emit(channels=channels)
+
+
+def twitch_avatars(headers, logins):
+    avatars = {}
+    for start in range(0, len(logins), 100):
+        payload, error = helix(headers, "users", {"login": logins[start:start + 100]})
+        if error:
+            continue
+        for user in payload.get("data") or []:
+            avatars[user.get("login", "")] = user.get("profile_image_url", "")
+    return avatars
+
+
+def twitch_check(args):
+    """Which enabled channels are live. Going live is the edge we alert on, so a
+    stream that was already live when we started is baselined, not announced."""
+    if not args.login:
+        emit(items=[], fresh=[])
+    headers, record, problem = twitch_headers(args)
+    if problem:
+        emit(problem[0], problem[1], items=[], fresh=[])
+
+    live, warnings = [], []
+    for start in range(0, len(args.login), 100):
+        batch = args.login[start:start + 100]
+        payload, error = helix(headers, "streams", {"user_login": batch, "first": 100})
+        if error:
+            warnings.append(redact((payload or {}).get("message") or error))
+            continue
+        for stream in payload.get("data") or []:
+            live.append({
+                "id": stream.get("id", ""),
+                "kind": "twitch",
+                "channelId": stream.get("user_id", ""),
+                "login": stream.get("user_login", ""),
+                "channelName": stream.get("user_name") or stream.get("user_login", ""),
+                "title": stream.get("title") or "Live now",
+                "game": stream.get("game_name", ""),
+                "viewers": stream.get("viewer_count", 0),
+                "url": "https://www.twitch.tv/" + stream.get("user_login", ""),
+                "publishedAt": stream.get("started_at", ""),
+                "thumbnail": (stream.get("thumbnail_url") or "")
+                              .replace("{width}", "440").replace("{height}", "248"),
+            })
+
+    state = seen_state("twitch")
+    known = state.get("live")
+    live_ids = {item["login"]: item["id"] for item in live}
+    fresh = []
+    if known is None:
+        # First run after connecting: remember who is up, announce nobody.
+        state["live"] = live_ids
+    else:
+        fresh = [item for item in live if known.get(item["login"]) != item["id"]]
+        state["live"] = live_ids
+
+    for item in fresh:
+        item["avatar"] = cache_avatar("tw-" + item["login"], item.get("thumbnail"))
+
+    live.sort(key=lambda item: item.get("viewers", 0), reverse=True)
+    if args.commit:
+        save_seen("twitch", state)
+    emit(items=live, fresh=fresh, warnings=warnings)
+
+
+# --------------------------------------------------------------------------
+# cli
+# --------------------------------------------------------------------------
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="creators", description=__doc__)
+    parser.add_argument("--timeout", type=int, default=90)
+    parser.add_argument("--client-id", default=os.environ.get("CREATORS_TWITCH_CLIENT_ID", ""))
+    subparsers = parser.add_subparsers(dest="group", required=True)
+
+    youtube = subparsers.add_parser("youtube").add_subparsers(dest="action", required=True)
+    catalog = youtube.add_parser("catalog")
+    catalog.add_argument("--browser", default="auto")
+    catalog.add_argument("--refresh", action="store_true")
+    catalog.set_defaults(run=youtube_catalog)
+    check = youtube.add_parser("check")
+    check.add_argument("--channel", action="append", default=[])
+    check.add_argument("--limit", type=int, default=60)
+    check.add_argument("--keep", type=int, default=15)
+    check.add_argument("--commit", action="store_true")
+    check.add_argument("--workers", type=int, default=8)
+    check.set_defaults(run=youtube_check)
+
+    twitch = subparsers.add_parser("twitch").add_subparsers(dest="action", required=True)
+    twitch.add_parser("catalog").set_defaults(run=twitch_catalog)
+    live = twitch.add_parser("check")
+    live.add_argument("--login", action="append", default=[])
+    live.add_argument("--commit", action="store_true")
+    live.set_defaults(run=twitch_check)
+    twitch.add_parser("login").set_defaults(run=twitch_login)
+    twitch.add_parser("login-poll").set_defaults(run=twitch_login_poll)
+    twitch.add_parser("logout").set_defaults(run=twitch_logout)
+
+    subparsers.add_parser("browsers").set_defaults(
+        run=lambda args: emit(browsers=discover_browsers()))
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    os.makedirs(STATE_DIR, exist_ok=True)
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    try:
+        args.run(args)
+    except SystemExit:
+        raise
+    except Exception as error:  # never let a traceback reach the panel
+        emit("error", redact(error))
+
+
+if __name__ == "__main__":
+    main()

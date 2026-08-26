@@ -1,0 +1,164 @@
+{
+  "schemaVersion": 1,
+  "id": "renews.creators",
+  "name": "Omarchy Creators",
+  "version": "0.1.0",
+  "author": "renews",
+  "license": "MIT",
+  "description": "Alerts for new YouTube uploads and Twitch channels going live, for the channels you switch on. Plays a chime, raises a desktop notification, and opens the video either in the browser or in a snap-positioned picture-in-picture window.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Omarchy Creators",
+    "description": "Pick channels from your YouTube subscriptions and Twitch follows, then get a chime and a notification when they post or go live.",
+    "category": "Media",
+    "aliases": [
+      "creators",
+      "youtube",
+      "twitch",
+      "streams",
+      "subscriptions",
+      "live",
+      "notifications"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 300,
+      "youtubeEnabled": true,
+      "twitchEnabled": true,
+      "youtubeChannels": [],
+      "twitchChannels": [],
+      "cookieBrowser": "auto",
+      "twitchClientId": "u3epf2jrp7sqavp6k2doutc0e37c9t",
+      "soundEnabled": true,
+      "youtubeSoundPath": "bundled",
+      "twitchSoundPath": "bundled",
+      "notificationsEnabled": true,
+      "notificationTimeoutSec": 12,
+      "clickAction": "Browser",
+      "pipPosition": "bottom-right",
+      "pipSize": "medium"
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Check interval (seconds)",
+        "description": "How often to look for new uploads and live channels.",
+        "min": 60,
+        "max": 3600,
+        "step": 60,
+        "defaultValue": 300
+      },
+      {
+        "key": "youtubeEnabled",
+        "type": "boolean",
+        "label": "Watch YouTube",
+        "defaultValue": true
+      },
+      {
+        "key": "twitchEnabled",
+        "type": "boolean",
+        "label": "Watch Twitch",
+        "defaultValue": true
+      },
+      {
+        "key": "cookieBrowser",
+        "type": "string",
+        "label": "YouTube session source",
+        "description": "Which browser profile to read your subscriptions from. Leave as auto to pick the newest signed-in profile, or use yt-dlp's BROWSER:PROFILE syntax.",
+        "defaultValue": "auto"
+      },
+      {
+        "key": "twitchClientId",
+        "type": "string",
+        "label": "Twitch Client ID",
+        "description": "The Twitch application this plugin signs in with. It ships with the plugin, so leave it alone unless you want to point the plugin at your own registered app.",
+        "defaultValue": "u3epf2jrp7sqavp6k2doutc0e37c9t"
+      },
+      {
+        "key": "clickAction",
+        "type": "enum",
+        "label": "Clicking a notification",
+        "description": "What a click on the notification body does. Both buttons are always offered.",
+        "options": [
+          "Browser",
+          "Picture in picture"
+        ],
+        "defaultValue": "Browser"
+      },
+      {
+        "key": "pipPosition",
+        "type": "enum",
+        "label": "Picture-in-picture corner",
+        "options": [
+          "top-left",
+          "top-center",
+          "top-right",
+          "middle-left",
+          "center",
+          "middle-right",
+          "bottom-left",
+          "bottom-center",
+          "bottom-right"
+        ],
+        "defaultValue": "bottom-right"
+      },
+      {
+        "key": "pipSize",
+        "type": "enum",
+        "label": "Picture-in-picture size",
+        "options": [
+          "small",
+          "medium",
+          "large"
+        ],
+        "defaultValue": "medium"
+      },
+      {
+        "key": "soundEnabled",
+        "type": "boolean",
+        "label": "Play a chime",
+        "defaultValue": true
+      },
+      {
+        "key": "youtubeSoundPath",
+        "type": "path",
+        "label": "YouTube chime",
+        "description": "Use bundled, or an absolute path to an audio file.",
+        "defaultValue": "bundled"
+      },
+      {
+        "key": "twitchSoundPath",
+        "type": "path",
+        "label": "Twitch chime",
+        "description": "Use bundled, or an absolute path to an audio file.",
+        "defaultValue": "bundled"
+      },
+      {
+        "key": "notificationsEnabled",
+        "type": "boolean",
+        "label": "Show desktop notifications",
+        "defaultValue": true
+      },
+      {
+        "key": "notificationTimeoutSec",
+        "type": "integer",
+        "label": "Notification timeout (seconds)",
+        "description": "0 keeps the notification up until it is clicked or dismissed.",
+        "min": 0,
+        "max": 120,
+        "step": 1,
+        "defaultValue": 12
+      }
+    ]
+  }
+}

@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# Picture-in-picture player for the Omarchy Creators plugin.
+#
+# Runs one mpv window under a private app id so Hyprland can be told exactly
+# where to put it, without any persistent window rules to install. The window
+# stays floating and pinned, so it survives workspace switches and can still be
+# dragged and resized freely with the usual Super+mouse bindings.
+#
+#   creators-pip open <url> [--position P] [--size S] [--title T]
+#   creators-pip position <P>      move to one of the nine anchors
+#   creators-pip size <S>          small | medium | large | WIDTHxHEIGHT
+#   creators-pip nudge <dx> <dy>   shift by pixels
+#   creators-pip pin               toggle always-on-top / all-workspaces
+#   creators-pip close
+#   creators-pip status            JSON: running, position, size
+
+set -uo pipefail
+
+APP_ID="omarchy-creators-pip"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/creators"
+STATE_FILE="$STATE_DIR/pip.json"
+DEFAULT_POSITION="bottom-right"
+DEFAULT_SIZE="medium"
+MARGIN=16
+
+POSITIONS="top-left top-center top-right middle-left center middle-right bottom-left bottom-center bottom-right"
+
+die() { echo "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+have hyprctl || die "hyprctl is required"
+have jq || die "jq is required"
+have mpv || die "mpv is required"
+mkdir -p "$STATE_DIR"
+
+# ---------------------------------------------------------------------------
+# state
+# ---------------------------------------------------------------------------
+
+state_get() {
+  jq -r --arg key "$1" --arg fallback "$2" '.[$key] // $fallback' "$STATE_FILE" 2>/dev/null \
+    || printf '%s' "$2"
+}
+
+state_set() {
+  local position=$1 size=$2 url=$3
+  jq -n --arg position "$position" --arg size "$size" --arg url "$url" \
+    '{position:$position,size:$size,url:$url}' >"$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# window lookup
+# ---------------------------------------------------------------------------
+
+pip_window() {
+  hyprctl clients -j | jq -c --arg app "$APP_ID" \
+    'map(select(.class == $app or .initialClass == $app)) | first // empty'
+}
+
+pip_address() { pip_window | jq -r '.address // empty'; }
+
+wait_for_window() {
+  local address deadline=$((SECONDS + 20))
+  while ((SECONDS < deadline)); do
+    address=$(pip_address)
+    [[ -n $address ]] && { printf '%s' "$address"; return 0; }
+    sleep 0.15
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# geometry
+# ---------------------------------------------------------------------------
+
+# The monitor the PiP window sits on, or the focused one before it exists.
+target_monitor() {
+  local monitor_id found
+  monitor_id=$(pip_window | jq -r '.monitor // -1' 2>/dev/null)
+  if [[ $monitor_id =~ ^[0-9]+$ ]]; then
+    found=$(hyprctl monitors -j | jq -c --argjson id "$monitor_id" \
+      'map(select(.id == $id)) | first // empty')
+    [[ -n $found ]] && { printf '%s' "$found"; return 0; }
+  fi
+  hyprctl monitors -j | jq -c 'map(select(.focused)) | first // .[0]'
+}
+
+resolve_size() {
+  case "$1" in
+    small) echo "480 270" ;;
+    medium) echo "720 405" ;;
+    large) echo "960 540" ;;
+    *x*) echo "${1%x*} ${1#*x}" ;;
+    *) echo "720 405" ;;
+  esac
+}
+
+# Anchor inside the monitor's usable area, honouring the bar's reserved strip.
+resolve_origin() {
+  local position=$1 width=$2 height=$3 monitor=$4
+  local mx my mw mh rl rt rr rb
+  mx=$(jq -r '.x' <<<"$monitor"); my=$(jq -r '.y' <<<"$monitor")
+  mw=$(jq -r '.width' <<<"$monitor"); mh=$(jq -r '.height' <<<"$monitor")
+  local scale; scale=$(jq -r '.scale // 1' <<<"$monitor")
+  mw=$(awk -v w="$mw" -v s="$scale" 'BEGIN{printf "%d", w/s}')
+  mh=$(awk -v h="$mh" -v s="$scale" 'BEGIN{printf "%d", h/s}')
+  rl=$(jq -r '.reserved[0]' <<<"$monitor"); rt=$(jq -r '.reserved[1]' <<<"$monitor")
+  rr=$(jq -r '.reserved[2]' <<<"$monitor"); rb=$(jq -r '.reserved[3]' <<<"$monitor")
+
+  local left=$((mx + rl + MARGIN)) top=$((my + rt + MARGIN))
+  local right=$((mx + mw - rr - MARGIN - width)) bottom=$((my + mh - rb - MARGIN - height))
+  local centerx=$(((left + right) / 2)) centery=$(((top + bottom) / 2))
+
+  case "$position" in
+    top-left) echo "$left $top" ;;
+    top-center) echo "$centerx $top" ;;
+    top-right) echo "$right $top" ;;
+    middle-left) echo "$left $centery" ;;
+    center) echo "$centerx $centery" ;;
+    middle-right) echo "$right $centery" ;;
+    bottom-left) echo "$left $bottom" ;;
+    bottom-center) echo "$centerx $bottom" ;;
+    bottom-right|*) echo "$right $bottom" ;;
+  esac
+}
+
+# Hyprland 0.56 dispatches through Lua: hl.dsp.<group>.<action>({ ... }).
+# Both move and resize take the pair as x/y with exact = true, and resize keeps
+# the window centred, so it has to run before the move.
+dispatch() { hyprctl dispatch "$1" >/dev/null 2>&1; }
+
+apply_geometry() {
+  local address=$1 position=$2 size=$3
+  local width height originx originy monitor
+  read -r width height < <(resolve_size "$size")
+  monitor=$(target_monitor)
+  [[ -z $monitor ]] && return 1
+  read -r originx originy < <(resolve_origin "$position" "$width" "$height" "$monitor")
+
+  dispatch "hl.dsp.window.float({ window = \"address:$address\", action = \"on\" })"
+  dispatch "hl.dsp.window.resize({ window = \"address:$address\", x = $width, y = $height, exact = true })"
+  dispatch "hl.dsp.window.move({ window = \"address:$address\", x = $originx, y = $originy, exact = true })"
+}
+
+set_pinned() {
+  local address=$1 wanted=$2 pinned
+  dispatch "hl.dsp.window.set_prop({ window = \"address:$address\", prop = \"alwaysontop\", value = $([[ $wanted == 1 ]] && echo true || echo false) })"
+  pinned=$(pip_window | jq -r '.pinned // false')
+  if [[ ($wanted == 1 && $pinned == false) || ($wanted == 0 && $pinned == true) ]]; then
+    dispatch "hl.dsp.window.pin({ window = \"address:$address\" })"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# commands
+# ---------------------------------------------------------------------------
+
+cmd_open() {
+  local url="" position="" size="" title="Stream PiP"
+  while (($# > 0)); do
+    case "$1" in
+      --position) position=$2; shift 2 ;;
+      --size) size=$2; shift 2 ;;
+      --title) title=$2; shift 2 ;;
+      --margin) MARGIN=$2; shift 2 ;;
+      -*) die "unknown option: $1" ;;
+      *) url=$1; shift ;;
+    esac
+  done
+  [[ -n $url ]] || die "usage: creators-pip open <url>"
+  [[ $url =~ ^https?:// ]] || die "refusing to open a non-http url"
+  position=${position:-$(state_get position "$DEFAULT_POSITION")}
+  size=${size:-$(state_get size "$DEFAULT_SIZE")}
+
+  # One PiP at a time: reuse the window by loading the new url into it.
+  local existing; existing=$(pip_address)
+  if [[ -n $existing ]]; then
+    if have socat && [[ -S /tmp/omarchy-creators-pip.sock ]]; then
+      printf '{"command":["loadfile","%s","replace"]}\n' "$url" |
+        socat - /tmp/omarchy-creators-pip.sock >/dev/null 2>&1
+    else
+      dispatch "hl.dsp.window.close({ window = \"address:$existing\" })"
+      sleep 0.4
+      existing=""
+    fi
+  fi
+
+  if [[ -z $existing ]]; then
+    setsid mpv \
+      --wayland-app-id="$APP_ID" --x11-name="$APP_ID" \
+      --title="$title" --force-window=immediate --keep-open=no \
+      --input-ipc-server=/tmp/omarchy-creators-pip.sock \
+      --no-terminal --ontop --border=no --osc=yes \
+      --script-opts=ytdl_hook-ytdl_path="$(command -v yt-dlp || echo yt-dlp)" \
+      --ytdl-format="bestvideo[height<=?1080]+bestaudio/best" \
+      "$url" >/dev/null 2>&1 &
+    disown
+  fi
+
+  local address; address=$(wait_for_window) || die "the PiP window never appeared"
+  apply_geometry "$address" "$position" "$size"
+  set_pinned "$address" 1
+  state_set "$position" "$size" "$url"
+}
+
+cmd_position() {
+  local position=${1:-$DEFAULT_POSITION}
+  [[ " $POSITIONS " == *" $position "* ]] || die "unknown position: $position"
+  local address; address=$(pip_address) || true
+  [[ -n $address ]] || die "no PiP window is open"
+  apply_geometry "$address" "$position" "$(state_get size "$DEFAULT_SIZE")"
+  state_set "$position" "$(state_get size "$DEFAULT_SIZE")" "$(state_get url "")"
+}
+
+cmd_size() {
+  local size=${1:-$DEFAULT_SIZE}
+  local address; address=$(pip_address) || true
+  [[ -n $address ]] || die "no PiP window is open"
+  apply_geometry "$address" "$(state_get position "$DEFAULT_POSITION")" "$size"
+  state_set "$(state_get position "$DEFAULT_POSITION")" "$size" "$(state_get url "")"
+}
+
+cmd_nudge() {
+  local address; address=$(pip_address) || true
+  [[ -n $address ]] || die "no PiP window is open"
+  dispatch "hl.dsp.window.move({ window = \"address:$address\", x = ${1:-0}, y = ${2:-0} })"
+}
+
+cmd_pin() {
+  local address; address=$(pip_address) || true
+  [[ -n $address ]] || die "no PiP window is open"
+  local pinned; pinned=$(pip_window | jq -r '.pinned // false')
+  [[ $pinned == true ]] && set_pinned "$address" 0 || set_pinned "$address" 1
+}
+
+cmd_close() {
+  local address; address=$(pip_address) || true
+  [[ -n $address ]] && dispatch "hl.dsp.window.close({ window = \"address:$address\" })"
+}
+
+cmd_status() {
+  local window; window=$(pip_window)
+  jq -n --argjson running "$([[ -n $window ]] && echo true || echo false)" \
+    --arg position "$(state_get position "$DEFAULT_POSITION")" \
+    --arg size "$(state_get size "$DEFAULT_SIZE")" \
+    --arg url "$(state_get url "")" \
+    '{running:$running,position:$position,size:$size,url:$url}'
+}
+
+case "${1:-}" in
+  open) shift; cmd_open "$@" ;;
+  position|move) shift; cmd_position "$@" ;;
+  size|resize) shift; cmd_size "$@" ;;
+  nudge) shift; cmd_nudge "$@" ;;
+  pin) cmd_pin ;;
+  close|stop) cmd_close ;;
+  status) cmd_status ;;
+  positions) printf '%s\n' $POSITIONS ;;
+  *) sed -n '2,16p' "$0" | sed 's/^# \?//'; exit 2 ;;
+esac

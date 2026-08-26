@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Desktop notification for one new video or one channel going live.
+#
+# notify-send blocks while actions are on screen and prints the chosen action
+# key, so this script stays alive for the life of the notification and then acts
+# on the click itself. That keeps click handling out of the shell process: the
+# QML service fires this and forgets it.
+#
+#   creators-notify --title T --body B --url URL [--icon PATH]
+#                 [--default browser|pip|none] [--timeout MS]
+#                 [--pip-position P] [--pip-size S] [--urgency LEVEL]
+
+set -uo pipefail
+
+title="" body="" url="" icon="" default="browser" timeout="12000"
+pip_position="" pip_size="" urgency="normal"
+here=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+
+while (($# > 0)); do
+  case "$1" in
+    --title) title=$2; shift 2 ;;
+    --body) body=$2; shift 2 ;;
+    --url) url=$2; shift 2 ;;
+    --icon) icon=$2; shift 2 ;;
+    --default) default=$2; shift 2 ;;
+    --timeout) timeout=$2; shift 2 ;;
+    --pip-position) pip_position=$2; shift 2 ;;
+    --pip-size) pip_size=$2; shift 2 ;;
+    --urgency) urgency=$2; shift 2 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n $title ]] || { echo "--title is required" >&2; exit 2; }
+[[ -z $url || $url =~ ^https?:// ]] || { echo "refusing a non-http url" >&2; exit 2; }
+
+open_browser() { [[ -n $url ]] && omarchy-launch-browser "$url"; }
+
+open_pip() {
+  [[ -n $url ]] || return 0
+  local args=("$here/creators-pip" open "$url" --title "$title")
+  [[ -n $pip_position ]] && args+=(--position "$pip_position")
+  [[ -n $pip_size ]] && args+=(--size "$pip_size")
+  "${args[@]}"
+}
+
+notify=(notify-send --app-name="Omarchy Creators" --urgency="$urgency" --expire-time="$timeout")
+[[ -n $icon && -f $icon ]] && notify+=(--icon="$icon")
+
+# "default" is the freedesktop key for a click on the notification body, and it
+# is the only action the Omarchy notification daemon invokes. The two named
+# actions are drawn as buttons by daemons that support them (mako, dunst), so
+# they are sent as well and simply ignored here.
+if [[ -n $url ]]; then
+  [[ $default != none ]] && notify+=(--action="default=Open")
+  notify+=(--action="browser=Open" --action="pip=PiP")
+fi
+
+chosen=$("${notify[@]}" -- "$title" "$body" 2>/dev/null)
+
+case "$chosen" in
+  browser) open_browser ;;
+  pip) open_pip ;;
+  default) [[ $default == pip ]] && open_pip || open_browser ;;
+  *) : ;;  # dismissed or timed out
+esac
