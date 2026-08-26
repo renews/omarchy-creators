@@ -65,7 +65,7 @@ is refreshed automatically. **Disconnect** deletes it.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/<you>/omarchy-creators.git --enable --yes
+omarchy plugin add https://github.com/renews/omarchy-creators.git --enable --yes
 ```
 
 Or, from a checkout in `~/.config/omarchy/plugins/renews.creators/`:
@@ -74,6 +74,28 @@ Or, from a checkout in `~/.config/omarchy/plugins/renews.creators/`:
 omarchy-shell shell rescanPlugins
 omarchy plugin enable renews.creators --section right
 ```
+
+The plugin writes nothing outside its own directory, its own state and cache
+directories, and its own entry in `shell.json`. It never edits your Hyprland
+config: the picture-in-picture window is placed with runtime `hyprctl`
+dispatches, so there are no window rules to install or to clean up afterwards.
+
+## Removing it
+
+```bash
+omarchy plugin remove renews.creators
+```
+
+That disables the plugin and deletes its directory and its `shell.json` entry.
+To take everything else with it — including the stored Twitch token:
+
+```bash
+rm -rf ~/.local/state/omarchy/creators ~/.cache/omarchy/creators
+```
+
+Revoking the plugin's access to your Twitch account is separate, and is done
+from <https://www.twitch.tv/settings/connections>. Nothing is left on YouTube's
+side to revoke: the plugin only ever reads your existing browser session.
 
 ## Using it
 
