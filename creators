@@ -24,6 +24,7 @@ Subcommands:
 import argparse
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -41,6 +42,13 @@ TWITCH_DEVICE_URL = "https://id.twitch.tv/oauth2/device"
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 TWITCH_HELIX = "https://api.twitch.tv/helix/"
 YOUTUBE_FEED = "https://www.youtube.com/feeds/videos.xml?channel_id="
+# YouTube's RSS endpoint answers the same valid feed URL with 200, 404 and 500
+# at random under any sustained polling, so none of these say anything about
+# the channel and all of them are worth another try.
+FEED_RETRY_STATUS = frozenset((403, 404, 408, 429, 500, 502, 503, 504))
+FEED_ATTEMPTS = 4
+TRANSIENT_PREFIX = "feed unavailable: "
+TRANSIENT = TRANSIENT_PREFIX + "%s"
 ATOM = "{http://www.w3.org/2005/Atom}"
 MEDIA = "{http://search.yahoo.com/mrss/}"
 
@@ -320,20 +328,43 @@ def youtube_check(args):
             warnings.append("%s: not a channel id" % channel_id)
 
     def pull(channel_id):
-        try:
-            payload = fetch(YOUTUBE_FEED + urllib.parse.quote(channel_id), timeout=30)
-            return channel_id, parse_feed(payload, channel_id), None
-        except Exception as error:
-            return channel_id, [], redact(error)
+        url = YOUTUBE_FEED + urllib.parse.quote(channel_id)
+        transient = None
+        for attempt in range(FEED_ATTEMPTS):
+            try:
+                return channel_id, parse_feed(fetch(url, timeout=30), channel_id), None
+            except urllib.error.HTTPError as error:
+                if error.code not in FEED_RETRY_STATUS:
+                    return channel_id, [], redact(error)
+                transient = redact(error)
+            except (urllib.error.URLError, OSError) as error:
+                transient = redact(error)
+            except Exception as error:
+                return channel_id, [], redact(error)
+            if attempt + 1 < FEED_ATTEMPTS:
+                # Exponential, because the throttle that produced the error
+                # lasts seconds rather than milliseconds, and jittered so a pool
+                # of workers throttled together does not return in lockstep and
+                # get throttled again. Checks are minutes apart, so a few
+                # seconds spent here costs nothing.
+                time.sleep(0.8 * (2 ** attempt) + random.random() * 0.5)
+        return channel_id, [], TRANSIENT % transient
 
     # One feed per channel, so fetch a batch at a time or a long enabled list
     # would take minutes of round-trips.
     with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         results = list(pool.map(pull, wanted))
 
+    flaky = 0
     for channel_id, videos, error in results:
         if error:
-            warnings.append("%s: %s" % (channel_id, error))
+            # A feed that only ever gave transient answers is not worth naming:
+            # it says nothing the user can act on, and on a long enabled list it
+            # would bury the warnings that do.
+            if error.startswith(TRANSIENT_PREFIX):
+                flaky += 1
+            else:
+                warnings.append("%s: %s" % (channel_id, error))
             continue
 
         items.extend(videos)
@@ -350,6 +381,14 @@ def youtube_check(args):
 
     for video in fresh:
         video["avatar"] = cache_avatar("yt-" + video["channelId"], video.get("thumbnail"))
+
+    # A feed or two going quiet in a round costs nothing but a late
+    # notification, and saying so in red every few checks is worse than saying
+    # nothing. Only speak up once enough of them are quiet that the panel is
+    # showing a visibly thinner feed than it should.
+    if flaky and flaky * 2 > len(wanted):
+        warnings.append("%d of %d channel feeds did not answer; retrying next check"
+                        % (flaky, len(wanted)))
 
     items.sort(key=lambda video: video.get("publishedAt", ""), reverse=True)
     fresh.sort(key=lambda video: video.get("publishedAt", ""), reverse=True)

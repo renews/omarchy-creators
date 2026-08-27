@@ -47,6 +47,16 @@ support), then each enabled channel is polled through its public RSS feed. Set
 yt-dlp's `BROWSER:PROFILE` syntax to pin one. Firefox forks such as Zen and
 LibreWolf are read as `firefox` pointed at their profile directory.
 
+That RSS endpoint is unreliable in a way that is worth knowing about: it answers
+the *same valid feed URL* with 200, 404 and 500 more or less at random once you
+poll it with any regularity. A 404 there says nothing about the channel. Each
+feed is therefore retried up to four times with an exponential, jittered
+backoff. A feed that still will not answer is picked up on the next check, so
+the only cost is a late notification, and the panel stays quiet about it — it
+speaks up only once more than half the enabled feeds have gone quiet in the
+same round, which is the point at which you are looking at a visibly thinner
+feed rather than a hiccup.
+
 **Twitch** gates follow lists behind an authorised session — the cookies in your
 browser carry a token without the `user:read:follows` scope, and the GraphQL
 fields for follows are fenced off — so the plugin signs in properly instead.
