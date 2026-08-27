@@ -22,11 +22,13 @@ Subcommands:
   browsers                 cookie sources we can read a YouTube session from
 """
 import argparse
+import errno
 import json
 import os
 import random
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -48,6 +50,7 @@ YOUTUBE_FEED = "https://www.youtube.com/feeds/videos.xml?channel_id="
 FEED_RETRY_STATUS = frozenset((403, 404, 408, 429, 500, 502, 503, 504))
 FEED_ATTEMPTS = 4
 TRANSIENT_PREFIX = "feed unavailable: "
+OFFLINE_PREFIX = "offline: "
 TRANSIENT = TRANSIENT_PREFIX + "%s"
 ATOM = "{http://www.w3.org/2005/Atom}"
 MEDIA = "{http://search.yahoo.com/mrss/}"
@@ -77,6 +80,46 @@ def emit(state="ready", message="", **fields):
     json.dump(document, sys.stdout)
     sys.stdout.write("\n")
     sys.exit(0)
+
+
+# A machine that has just booted or resumed reaches the plugin's first check
+# before NetworkManager has finished, and DNS answers with these rather than
+# with anything about YouTube or Twitch. They mean "ask again shortly".
+OFFLINE_ERRNOS = frozenset((errno.ENETUNREACH, errno.EHOSTUNREACH,
+                            errno.ECONNREFUSED, errno.ENETDOWN, errno.ECONNRESET))
+OFFLINE_MARKS = ("temporary failure in name resolution", "name or service not known",
+                 "nodename nor servname provided", "network is unreachable",
+                 "no route to host", "try again")
+OFFLINE_STATE = "offline"
+OFFLINE_MESSAGE = "Waiting for the network"
+
+
+def offline_error(error):
+    """True when a failure is the network being absent, not the service."""
+    reason = getattr(error, "reason", error)
+    if isinstance(reason, socket.gaierror) or isinstance(error, socket.gaierror):
+        return True
+    if isinstance(error, urllib.error.HTTPError):
+        return False
+    number = getattr(reason, "errno", None) or getattr(error, "errno", None)
+    if number in OFFLINE_ERRNOS:
+        return True
+    text = str(error).lower()
+    return any(mark in text for mark in OFFLINE_MARKS)
+
+
+def network_up(host="www.youtube.com"):
+    """Whether the machine can reach the internet at all right now.
+
+    This opens a socket rather than only resolving a name: nss-resolve answers
+    over a unix socket to systemd-resolved, so a lookup can succeed on a machine
+    with no route out. Nothing is sent; the connection is closed immediately.
+    """
+    try:
+        socket.create_connection((host, 443), timeout=4).close()
+        return True
+    except OSError:
+        return False
 
 
 def redact(text):
@@ -278,6 +321,12 @@ def youtube_catalog(args):
 
     if not channels:
         detail = redact(completed.stderr) or "No subscriptions came back."
+        # yt-dlp reports a failed webpage download as an authentication problem,
+        # so an offline machine gets told its cookies are wrong. Ask the network
+        # before repeating that to the user.
+        if not network_up():
+            emit(OFFLINE_STATE, OFFLINE_MESSAGE,
+                 channels=(cached or {}).get("channels", []))
         signed_out = "cookies" in detail.lower() or "sign in" in detail.lower()
         emit("signed-out" if signed_out else "error",
              "Could not read subscriptions from %s. %s" % (spec, detail),
@@ -338,6 +387,8 @@ def youtube_check(args):
                     return channel_id, [], redact(error)
                 transient = redact(error)
             except (urllib.error.URLError, OSError) as error:
+                if offline_error(error):
+                    return channel_id, [], OFFLINE_PREFIX + redact(error)
                 transient = redact(error)
             except Exception as error:
                 return channel_id, [], redact(error)
@@ -355,13 +406,15 @@ def youtube_check(args):
     with futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         results = list(pool.map(pull, wanted))
 
-    flaky = 0
+    flaky = offline = 0
     for channel_id, videos, error in results:
         if error:
             # A feed that only ever gave transient answers is not worth naming:
             # it says nothing the user can act on, and on a long enabled list it
             # would bury the warnings that do.
-            if error.startswith(TRANSIENT_PREFIX):
+            if error.startswith(OFFLINE_PREFIX):
+                offline += 1
+            elif error.startswith(TRANSIENT_PREFIX):
                 flaky += 1
             else:
                 warnings.append("%s: %s" % (channel_id, error))
@@ -381,6 +434,15 @@ def youtube_check(args):
 
     for video in fresh:
         video["avatar"] = cache_avatar("yt-" + video["channelId"], video.get("thumbnail"))
+
+    # Nothing resolved, so this says nothing about YouTube: the machine is not
+    # on the network yet. Say so once, plainly, and let the service come back
+    # sooner than the usual interval rather than painting the panel red.
+    if offline and offline == len(wanted):
+        emit(OFFLINE_STATE, OFFLINE_MESSAGE, items=[], fresh=[])
+    # A partial outage is indistinguishable from throttling from here, so the
+    # rest are counted with the feeds that simply went quiet.
+    flaky += offline
 
     # A feed or two going quiet in a round costs nothing but a late
     # notification, and saying so in red every few checks is worse than saying
@@ -418,6 +480,8 @@ def twitch_headers(args):
         if refreshed:
             record = refreshed
             token = record["accessToken"]
+        elif not network_up("id.twitch.tv"):
+            return None, None, (OFFLINE_STATE, OFFLINE_MESSAGE)
         else:
             return None, None, ("signed-out", "Twitch session expired. Connect again.")
     return ({"Client-Id": args.client_id, "Authorization": "Bearer " + token},
@@ -571,6 +635,8 @@ def twitch_check(args):
         batch = args.login[start:start + 100]
         payload, error = helix(headers, "streams", {"user_login": batch, "first": 100})
         if error:
+            if payload is None and offline_error(error):
+                emit(OFFLINE_STATE, OFFLINE_MESSAGE, items=[], fresh=[])
             warnings.append(redact((payload or {}).get("message") or error))
             continue
         for stream in payload.get("data") or []:

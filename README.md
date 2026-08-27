@@ -57,6 +57,13 @@ speaks up only once more than half the enabled feeds have gone quiet in the
 same round, which is the point at which you are looking at a visibly thinner
 feed rather than a hiccup.
 
+A machine that has just booted is a separate case: the plugin's first check can
+easily beat NetworkManager to the finish, and the errors that come back then say
+nothing useful — Twitch reports a name-resolution failure, and yt-dlp reports a
+failed webpage download as though your cookies were wrong. When a check finds no
+route out at all the panel simply says **Waiting for the network** and tries
+again every 20 seconds until there is one.
+
 **Twitch** gates follow lists behind an authorised session — the cookies in your
 browser carry a token without the `user:read:follows` scope, and the GraphQL
 fields for follows are fenced off — so the plugin signs in properly instead.

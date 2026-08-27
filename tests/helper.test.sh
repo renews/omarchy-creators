@@ -42,6 +42,22 @@ assert_jq '.fresh | length == 0' "$out" "a bad channel id produced an alert"
 out=$("$HELPER" youtube check)
 assert_jq '.items == [] and .fresh == []' "$out" "an empty check was not empty"
 
+# A machine with no route out must say so plainly instead of blaming YouTube or
+# the user's cookies. unshare gives us a network namespace with only loopback;
+# where unprivileged namespaces are disabled there is no way to test it offline,
+# so the check is skipped rather than faked.
+if unshare -rn true 2>/dev/null; then
+  out=$(unshare -rn "$HELPER" youtube check --channel "UCXuqSBlHAE6Xw-yeJA0Tunw")
+  assert_jq '.state == "offline"' "$out" "an unreachable network was not reported as offline"
+  assert_jq '.warnings == []' "$out" "being offline produced per-channel warnings"
+
+  out=$(unshare -rn "$HELPER" --client-id test twitch check --login someone)
+  assert_jq '.state == "offline" or .state == "signed-out"' "$out" \
+    "an unreachable network confused the twitch check"
+else
+  echo "helper.test.sh: skipping offline checks (unprivileged namespaces unavailable)"
+fi
+
 # Twitch without a client id has to say so rather than fail opaquely.
 out=$("$HELPER" twitch catalog)
 assert_jq '.state == "no-client-id"' "$out" "missing client id was not reported"

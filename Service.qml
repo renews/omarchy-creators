@@ -43,6 +43,7 @@ Item {
   property int unseenCount: 0
   property var soundQueue: []
   property bool refreshQueued: false
+  property bool offline: false
 
   readonly property string helperPath: localPath(Qt.resolvedUrl("creators"))
   readonly property string notifyPath: localPath(Qt.resolvedUrl("creators-notify"))
@@ -114,6 +115,7 @@ Item {
     }
     refreshQueued = false
     warnings = []
+    offline = false
 
     if (watchedCount === 0) {
       state = "ready"
@@ -159,6 +161,13 @@ Item {
     }
 
     if (String(data.state || "") !== "ready") {
+      // The machine is not on the network yet — after a reboot the first check
+      // beats NetworkManager to it. That is not something to warn about, and
+      // not a reason to make the user wait a full interval for the truth.
+      if (data.state === "offline") {
+        offline = true
+        return
+      }
       warnings = warnings.concat([kind + ": " + String(data.message || "check failed")])
       if (kind === "twitch" && data.state === "signed-out") twitchAuthState = "signed-out"
       return
@@ -175,7 +184,7 @@ Item {
   function settle() {
     if (youtubeProcess.running || twitchProcess.running) return
     state = warnings.length > 0 && feed.length === 0 ? "error" : "ready"
-    message = summary()
+    message = offline ? "Waiting for the network" : summary()
     if (refreshQueued) {
       refreshQueued = false
       Qt.callLater(checkNow)
@@ -329,6 +338,16 @@ Item {
     interval: root.refreshIntervalSec * 1000
     running: root.configured && root.watchedCount > 0
     repeat: true
+    onTriggered: root.checkNow()
+  }
+
+  // A check that found no network is worth repeating in seconds rather than
+  // minutes: the usual case is a machine that has just booted, and the network
+  // arrives long before the next interval would.
+  Timer {
+    interval: 20000
+    repeat: true
+    running: root.offline && root.configured && root.watchedCount > 0
     onTriggered: root.checkNow()
   }
 
