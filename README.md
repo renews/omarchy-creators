@@ -8,6 +8,16 @@ you can snap anywhere on screen.
 
 You choose which channels alert you. Everything else stays quiet.
 
+## Screenshots
+
+| Feed | YouTube |
+| --- | --- |
+| ![The feed tab, listing recent uploads and live channels](docs/screenshots/feed.png) | ![The YouTube tab, with a search box and a switch on every subscription](docs/screenshots/youtube.png) |
+
+| Twitch | Player |
+| --- | --- |
+| ![The Twitch tab, with a search box and a switch on every followed channel](docs/screenshots/twitch.png) | ![The player tab, with the click action, the nine picture-in-picture anchors, sizes and chimes](docs/screenshots/player.png) |
+
 ## What it does
 
 - **A channel list with a switch on every row.** Both tabs are searchable,
