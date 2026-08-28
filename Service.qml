@@ -175,9 +175,10 @@ Item {
     if (kind === "twitch") {
       twitchAuthState = "connected"
       live = Array.isArray(data.items) ? data.items : []
+      feed = feed.filter(function (item) { return item.kind !== "twitch" })
+    } else {
+      feed = Model.mergeFeed(feed, Array.isArray(data.items) ? data.items : [], 80)
     }
-
-    feed = Model.mergeFeed(feed, Array.isArray(data.items) ? data.items : [], 80)
     announce(Array.isArray(data.fresh) ? data.fresh : [])
   }
 
