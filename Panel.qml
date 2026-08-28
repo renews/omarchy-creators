@@ -135,6 +135,7 @@ Panel {
     const entry = item || {}
     if (entry.kind === "twitch") {
       const parts = []
+      if (entry.channelName) parts.push(String(entry.channelName))
       if (entry.game) parts.push(String(entry.game))
       if (entry.viewers) parts.push(Model.compactCount(entry.viewers) + " watching")
       parts.push("live " + Model.liveFor(entry.publishedAt, root.nowMs))
@@ -145,8 +146,8 @@ Panel {
 
   function statusText() {
     if (!monitor) return "Service unavailable"
-    if (monitor.state === "loading") return "Checking for new videos and streams"
-    return monitor.message
+    return ""
+    // return String(monitor.liveCount || 0) + " live"
   }
 
   function heroMeta() {
