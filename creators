@@ -29,8 +29,10 @@ import random
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -62,6 +64,17 @@ CACHE_DIR = os.path.join(XDG_CACHE, "omarchy", "creators")
 AVATAR_DIR = os.path.join(CACHE_DIR, "avatars")
 TOKEN_PATH = os.path.join(STATE_DIR, "twitch-token.json")
 CATALOG_TTL = 6 * 3600
+
+# Nothing on the other side of a socket, a pipe or a file is trusted to stop on
+# its own. Every remote body, helper stream and on-disk record is read through a
+# ceiling, so a hostile or broken producer cannot exhaust this helper and then
+# hand oversized JSON to the long-lived shell.
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_ERROR_BODY_BYTES = 64 * 1024
+MAX_AVATAR_BYTES = 4 * 1024 * 1024
+MAX_STATE_BYTES = 8 * 1024 * 1024
+MAX_CATALOG_BYTES = 32 * 1024 * 1024
+MAX_HELPER_STDERR_BYTES = 256 * 1024
 
 
 # --------------------------------------------------------------------------
@@ -129,25 +142,94 @@ def redact(text):
 
 
 # --------------------------------------------------------------------------
+# bounded reads
+# --------------------------------------------------------------------------
+
+class TooLarge(ValueError):
+    """A producer sent more than we agreed to buffer.
+
+    ValueError so the existing fetch/parse handlers treat an oversized body the
+    same way they treat an unparseable one: a redacted message, not a crash."""
+
+
+def read_capped(stream, limit, what="response"):
+    """Read at most `limit` bytes from `stream`.
+
+    Asking for one byte past the ceiling is what separates a body that exactly
+    fills the cap from one that overruns it, and it means we never hold more
+    than limit + 1 bytes no matter how much the far side intends to send."""
+    data = stream.read(limit + 1) or b""
+    if len(data) > limit:
+        raise TooLarge("%s exceeded %d bytes" % (what, limit))
+    return data
+
+
+# --------------------------------------------------------------------------
 # small JSON-file store
+#
+# State and cache live under predictable, world-known paths, so every write
+# lands on a fresh O_EXCL temp file and is renamed into place: os.replace swaps
+# the final name without following a symlink someone planted there, and the
+# record is never visible at its real name in a half-written state. Reads open
+# with O_NOFOLLOW for the same reason. Everything here is per-user, so
+# everything is owner-only.
 # --------------------------------------------------------------------------
 
 def read_json(path, fallback):
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, ValueError):
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return fallback
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            raw = read_capped(handle, MAX_STATE_BYTES, "state file")
+    except OSError:
+        return fallback
+    except ValueError:
+        return fallback
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
         return fallback
 
 
-def write_json(path, payload, private=False):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temporary = path + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle)
-    if private:
-        os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
+def atomic_write(path, body):
+    """Write `body` (bytes) to `path` via an unpredictable temp file.
+
+    mkstemp gives us an exclusive create under a name an attacker cannot guess
+    and 0600 from the moment the file exists, so there is no window where the
+    record is readable by anyone else or where a pre-planted name is honoured."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=".creators-", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(body)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def write_json(path, payload):
+    atomic_write(path, json.dumps(payload).encode("utf-8"))
+
+
+def fresh_regular_file(path, max_age=None):
+    """True when `path` is a real file we own the freshness of.
+
+    lstat rather than stat: a symlink parked at a cache name should not let its
+    target masquerade as our cached copy."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    return max_age is None or (time.time() - info.st_mtime) < max_age
 
 
 def seen_state(kind):
@@ -162,13 +244,13 @@ def save_seen(kind, payload):
 # http
 # --------------------------------------------------------------------------
 
-def fetch(url, headers=None, data=None, timeout=20, form=False):
+def fetch(url, headers=None, data=None, timeout=20, form=False, limit=MAX_RESPONSE_BYTES):
     body = None
     if data is not None:
         body = urllib.parse.urlencode(data).encode() if form else json.dumps(data).encode()
     request = urllib.request.Request(url, data=body, headers=headers or {})
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return response.read()
+        return read_capped(response, limit, "response body")
 
 
 def fetch_json(url, headers=None, data=None, timeout=20, form=False):
@@ -177,7 +259,13 @@ def fetch_json(url, headers=None, data=None, timeout=20, form=False):
     try:
         return json.loads(fetch(url, headers, data, timeout, form).decode("utf-8")), None
     except urllib.error.HTTPError as error:
-        raw = error.read().decode("utf-8", "replace")
+        # An error body only ever becomes a short message, so it gets a much
+        # tighter ceiling than a success body -- and overrunning it must not
+        # replace the HTTP status we came here to report.
+        try:
+            raw = read_capped(error, MAX_ERROR_BODY_BYTES, "error body").decode("utf-8", "replace")
+        except (OSError, ValueError):
+            return None, "http %d" % error.code
         try:
             return json.loads(raw), "http %d" % error.code
         except ValueError:
@@ -194,16 +282,70 @@ def cache_avatar(key, url):
         url = "https:" + url
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(key))[:80]
     path = os.path.join(AVATAR_DIR, safe + ".img")
-    if os.path.exists(path) and time.time() - os.path.getmtime(path) < 30 * 86400:
+    if fresh_regular_file(path, 30 * 86400):
         return path
     try:
-        payload = fetch(url, timeout=10)
+        payload = fetch(url, timeout=10, limit=MAX_AVATAR_BYTES)
     except Exception:
-        return path if os.path.exists(path) else ""
-    os.makedirs(AVATAR_DIR, exist_ok=True)
-    with open(path, "wb") as handle:
-        handle.write(payload)
+        return path if fresh_regular_file(path) else ""
+    try:
+        atomic_write(path, payload)
+    except OSError:
+        return ""
     return path
+
+
+# --------------------------------------------------------------------------
+# helper processes
+# --------------------------------------------------------------------------
+
+def drain_capped(stream, limit):
+    """Read one child stream up to its cap, then close it.
+
+    Closing early is the point: the child's next write gets EPIPE, so the cap is
+    enforced on the producer rather than by us quietly buffering whatever it
+    feels like sending. Returns (data, truncated)."""
+    try:
+        data = stream.read(limit + 1) or b""
+    except (OSError, ValueError):
+        data = b""
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+    if len(data) > limit:
+        return data[:limit], True
+    return data, False
+
+
+def run_capped(command, timeout, stdout_limit, stderr_limit=MAX_HELPER_STDERR_BYTES):
+    """Run `command`, keeping at most the given bytes from each stream.
+
+    Both pipes are drained concurrently -- draining one while the other fills
+    its kernel buffer is the classic way to deadlock a helper that talks on
+    both. Raises subprocess.TimeoutExpired so callers keep their existing
+    timeout branch. Returns (stdout, stderr, truncated) as text."""
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    pool = futures.ThreadPoolExecutor(max_workers=2)
+    try:
+        out_job = pool.submit(drain_capped, process.stdout, stdout_limit)
+        error_job = pool.submit(drain_capped, process.stderr, stderr_limit)
+        timed_out = False
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.kill()
+            process.wait()
+        out, out_over = out_job.result()
+        errors, errors_over = error_job.result()
+    finally:
+        pool.shutdown(wait=True)
+    if timed_out:
+        raise subprocess.TimeoutExpired(command, timeout)
+    return (out.decode("utf-8", "replace"), errors.decode("utf-8", "replace"),
+            out_over or errors_over)
 
 
 # --------------------------------------------------------------------------
@@ -295,13 +437,15 @@ def youtube_catalog(args):
                "--no-warnings", "--cookies-from-browser", spec,
                "https://www.youtube.com/feed/channels"]
     try:
-        completed = subprocess.run(command, capture_output=True, timeout=args.timeout, text=True)
+        catalog_out, catalog_errors, truncated = run_capped(
+            command, args.timeout, MAX_CATALOG_BYTES)
     except subprocess.TimeoutExpired:
         emit("error", "Timed out reading subscriptions from %s." % spec,
              channels=(cached or {}).get("channels", []))
 
     channels = []
-    for line in completed.stdout.splitlines():
+    # A cap can land mid-line; that partial line simply fails to parse below.
+    for line in catalog_out.splitlines():
         try:
             entry = json.loads(line)
         except ValueError:
@@ -320,7 +464,9 @@ def youtube_catalog(args):
         })
 
     if not channels:
-        detail = redact(completed.stderr) or "No subscriptions came back."
+        detail = redact(catalog_errors) or "No subscriptions came back."
+        if truncated:
+            detail = "Subscription list was too large to read safely. " + detail
         # yt-dlp reports a failed webpage download as an authentication problem,
         # so an offline machine gets told its cookies are wrong. Ask the network
         # before repeating that to the user.
@@ -334,7 +480,7 @@ def youtube_catalog(args):
 
     channels.sort(key=lambda item: item["name"].lower())
     write_json(cache_path, {"fetchedAt": time.time(), "channels": channels})
-    emit(channels=channels, cached=False, browser=spec)
+    emit(channels=channels, cached=False, browser=spec, truncated=truncated)
 
 
 def parse_feed(xml_bytes, channel_id):
@@ -501,7 +647,7 @@ def refresh_token(client_id, refresh):
         "refreshToken": payload.get("refresh_token", refresh),
         "expiresAt": time.time() + int(payload.get("expires_in", 3600)),
     }
-    write_json(TOKEN_PATH, record, private=True)
+    write_json(TOKEN_PATH, record)
     return record
 
 
@@ -525,7 +671,7 @@ def twitch_login(args):
         "deviceCode": payload["device_code"],
         "interval": payload.get("interval", 5),
         "expiresAt": time.time() + int(payload.get("expires_in", 1800)),
-    }, private=True)
+    })
     emit(userCode=payload.get("user_code", ""),
          verificationUri=payload.get("verification_uri") or "https://www.twitch.tv/activate",
          expiresIn=int(payload.get("expires_in", 1800)))
@@ -548,7 +694,7 @@ def twitch_login_poll(args):
             "accessToken": payload["access_token"],
             "refreshToken": payload.get("refresh_token", ""),
             "expiresAt": time.time() + int(payload.get("expires_in", 3600)),
-        }, private=True)
+        })
         try:
             os.remove(pending_path)
         except OSError:
