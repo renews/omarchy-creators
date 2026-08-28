@@ -191,22 +191,28 @@ function notifyCommand(helper, item, options) {
 
 // Merge a check result into the feed without letting it grow without bound, and
 // without losing an item that has scrolled out of the source's current window.
+// biome-ignore lint/correctness/noUnusedVariables: Service.qml calls this library export.
 function mergeFeed(existing, incoming, limit) {
   var seen = {}
   var out = []
   var lists = [arrayValues(incoming), arrayValues(existing)]
-  for (var listIndex = 0; listIndex < lists.length; listIndex++) {
-    var list = lists[listIndex]
-    for (var i = 0; i < list.length; i++) {
-      var item = list[i]
-      var key = String(item.kind || "") + ":" + String(item.id || "")
-      if (seen[key]) continue
+  var listIndex
+  var list
+  var itemIndex
+  var item
+  var key
+  for (listIndex = 0; listIndex < lists.length; listIndex++) {
+    list = lists[listIndex]
+    for (itemIndex = 0; itemIndex < list.length; itemIndex++) {
+      item = list[itemIndex]
+      key = `${String(item.kind || "")}:${String(item.id || "")}`
+      if (seen[key]) {
+        continue
+      }
       seen[key] = true
       out.push(item)
     }
   }
-  out.sort(function (a, b) {
-    return String(b.publishedAt || "").localeCompare(String(a.publishedAt || ""))
-  })
+  out.sort((a, b) => String(b.publishedAt || "").localeCompare(String(a.publishedAt || "")))
   return out.slice(0, limit || 80)
 }
