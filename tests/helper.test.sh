@@ -9,7 +9,10 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 HELPER="$ROOT/creators"
 PIP="$ROOT/creators-pip"
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
 assert_jq() { jq -e "$1" <<<"$2" >/dev/null || fail "$3"; }
 refuses() { "$@" >/dev/null 2>&1 && fail "accepted bad input: $*" || true; }
 
@@ -21,8 +24,10 @@ export XDG_STATE_HOME="$sandbox/state" XDG_CACHE_HOME="$sandbox/cache"
 
 bash -n "$PIP" || fail "creators-pip has a syntax error"
 bash -n "$ROOT/creators-notify" || fail "creators-notify has a syntax error"
-/usr/bin/env python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$HELPER" \
-  || fail "creators has a syntax error"
+/usr/bin/env python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$HELPER" ||
+  fail "creators has a syntax error"
+/usr/bin/env python3 "$ROOT/tests/state-io.test.py" ||
+  fail "creators state I/O safety checks failed"
 
 # --- creators ---------------------------------------------------------
 
