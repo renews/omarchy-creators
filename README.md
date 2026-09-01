@@ -129,7 +129,7 @@ side to revoke: the plugin only ever reads your existing browser session.
 Click the bar widget to open the panel.
 
 | | |
-|---|---|
+| --- | --- |
 | **Feed** | Live channels first, then recent uploads. Left click opens with your configured action, right click takes the other route. |
 | **YouTube** | Search your subscriptions and switch on the ones you want. |
 | **Twitch** | Connect once, then search your follows and switch them on. |
@@ -147,7 +147,7 @@ anchors in the Player tab are there for when you want it back in a corner.
 Everything is editable from Setup → Plugins, or inline in `shell.json`.
 
 | Key | Default | |
-|---|---|---|
+| --- | --- | --- |
 | `refreshIntervalSec` | `300` | How often to check, 60–3600. |
 | `youtubeEnabled` / `twitchEnabled` | `true` | Turn a whole service off. |
 | `youtubeChannels` / `twitchChannels` | `[]` | Managed by the panel's toggles. |
@@ -155,7 +155,7 @@ Everything is editable from Setup → Plugins, or inline in `shell.json`.
 | `twitchClientId` | shipped | Override to use your own app. |
 | `clickAction` | `Browser` | Or `Picture in picture`. |
 | `pipPosition` / `pipSize` | `bottom-right` / `medium` | |
-| `soundEnabled`, `youtubeSoundPath`, `twitchSoundPath` | `true`, `bundled` | |
+| `soundEnabled`, `soundVolume`, `youtubeSoundPath`, `twitchSoundPath` | `true`, `100`, `bundled` | Chime volume is a percentage for both services. |
 | `notificationsEnabled`, `notificationTimeoutSec` | `true`, `12` | `0` never expires. |
 
 ## Note on notification buttons
@@ -168,7 +168,7 @@ Feed tab's right click is the always-available way to take the other route.
 ## Layout
 
 | | |
-|---|---|
+| --- | --- |
 | `Service.qml` | Polling, alerting, sound queue, Twitch sign-in state. |
 | `Panel.qml` | Bar widget and the four-tab panel. |
 | `CreatorsModel.js` | Pure logic: search, selection, formatting, feed merge. |

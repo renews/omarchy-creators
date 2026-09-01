@@ -7,7 +7,7 @@ const source = readFileSync(
 const Model = new Function(
   source.replace(/^\.pragma library\s*$/m, "") +
     "; return { POSITIONS, SIZES, normalizeIds, sameArray, toggleSelection, matchesQuery," +
-    " channelKey, filterChannels, sortForPicker, clampInterval, normalizePosition," +
+    " channelKey, filterChannels, sortForPicker, clampInterval, normalizeChimeVolume, normalizePosition," +
     " normalizeSize, isPip, relativeTime, liveFor, compactCount, soundsForBatch," +
     " TWITCH_CLIENT_ID, twitchClientId," +
     " notificationTitle, notificationBody, notifyCommand, mergeFeed }",
@@ -61,6 +61,25 @@ check(
   Model.sameArray(["UCb", "UCa"], ["UCa", "UCb"]),
   true,
 );
+
+// --- settings --------------------------------------------------------------
+
+check(
+  "chime volume defaults to full volume",
+  Model.normalizeChimeVolume(undefined),
+  1,
+);
+check(
+  "chime volume accepts a persisted percentage",
+  Model.normalizeChimeVolume("65"),
+  0.65,
+);
+check(
+  "chime volume stays within the supported range",
+  Model.normalizeChimeVolume(400),
+  1,
+);
+check("chime volume clamps negative values", Model.normalizeChimeVolume(-1), 0);
 
 // --- search ----------------------------------------------------------------
 

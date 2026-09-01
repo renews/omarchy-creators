@@ -15,6 +15,7 @@ Item {
   property string cookieBrowser: "auto"
   property string twitchClientId: ""
   property bool soundEnabled: true
+  property real soundVolume: 1
   property bool notificationsEnabled: true
   property int notificationTimeoutSec: 12
   property string clickAction: "Browser"
@@ -86,6 +87,7 @@ Item {
     cookieBrowser = String(next.cookieBrowser || "auto")
     twitchClientId = String(next.twitchClientId || "").trim()
     soundEnabled = next.soundEnabled !== false
+    soundVolume = Model.normalizeChimeVolume(next.soundVolume)
     notificationsEnabled = next.notificationsEnabled !== false
     notificationTimeoutSec = Math.max(0, Math.min(120, parseInt(String(next.notificationTimeoutSec), 10) || 0))
     clickAction = String(next.clickAction || "Browser")
@@ -233,7 +235,7 @@ Item {
     if (soundProcess.running || soundQueue.length === 0) return
     const path = soundQueue[0]
     soundQueue = soundQueue.slice(1)
-    soundProcess.command = ["pw-play", path]
+    soundProcess.command = ["pw-play", "--volume", String(soundVolume), path]
     soundProcess.running = true
   }
 

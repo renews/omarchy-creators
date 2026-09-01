@@ -39,6 +39,7 @@
       "cookieBrowser": "auto",
       "twitchClientId": "u3epf2jrp7sqavp6k2doutc0e37c9t",
       "soundEnabled": true,
+      "soundVolume": 100,
       "youtubeSoundPath": "bundled",
       "twitchSoundPath": "bundled",
       "notificationsEnabled": true,
@@ -128,6 +129,16 @@
         "type": "boolean",
         "label": "Play a chime",
         "defaultValue": true
+      },
+      {
+        "key": "soundVolume",
+        "type": "integer",
+        "label": "Chime volume (%)",
+        "description": "Volume for YouTube and Twitch chimes.",
+        "min": 0,
+        "max": 100,
+        "step": 5,
+        "defaultValue": 100
       },
       {
         "key": "youtubeSoundPath",

@@ -92,7 +92,7 @@ function filterChannels(channels, query, selected, selectedOnly) {
 // filtering a list that can run to a thousand subscriptions.
 function sortForPicker(channels, selected) {
   var picked = normalizeIds(selected)
-  return arrayValues(channels).slice().sort(function (a, b) {
+  return arrayValues(channels).slice().sort((a, b) => {
     var aOn = picked.indexOf(channelKey(a)) !== -1
     var bOn = picked.indexOf(channelKey(b)) !== -1
     if (aOn !== bOn) return aOn ? -1 : 1
@@ -104,6 +104,15 @@ function clampInterval(value) {
   var seconds = parseInt(String(value === undefined || value === null ? 300 : value), 10)
   if (!isFinite(seconds)) seconds = 300
   return Math.max(60, Math.min(3600, seconds))
+}
+
+// `pw-play` expects a stream volume from 0 through 1, while the user-facing
+// setting and slider use an unambiguous percentage.
+// biome-ignore lint/correctness/noUnusedVariables: Panel.qml and Service.qml call this library export.
+function normalizeChimeVolume(value) {
+  var percent = Number(value === undefined || value === null || value === "" ? 100 : value)
+  if (!isFinite(percent)) percent = 100
+  return Math.max(0, Math.min(100, percent)) / 100
 }
 
 function normalizePosition(value) {
@@ -118,38 +127,42 @@ function isPip(clickAction) {
   return String(clickAction || "").toLowerCase().indexOf("picture") === 0
 }
 
+// biome-ignore lint/correctness/noUnusedVariables: Panel.qml calls this library export.
 function relativeTime(value, nowMs) {
   var then = new Date(String(value || "")).getTime()
   if (!isFinite(then)) return ""
   var seconds = Math.max(0, Math.floor(((nowMs || Date.now()) - then) / 1000))
   if (seconds < 60) return "just now"
-  if (seconds < 3600) return Math.floor(seconds / 60) + "m ago"
-  if (seconds < 86400) return Math.floor(seconds / 3600) + "h ago"
-  if (seconds < 7 * 86400) return Math.floor(seconds / 86400) + "d ago"
-  return Math.floor(seconds / (7 * 86400)) + "w ago"
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
+  if (seconds < 7 * 86400) return `${Math.floor(seconds / 86400)}d ago`
+  return `${Math.floor(seconds / (7 * 86400))}w ago`
 }
 
+// biome-ignore lint/correctness/noUnusedVariables: Panel.qml calls this library export.
 function liveFor(value, nowMs) {
   var then = new Date(String(value || "")).getTime()
   if (!isFinite(then)) return ""
   var minutes = Math.max(0, Math.floor(((nowMs || Date.now()) - then) / 60000))
-  if (minutes < 60) return minutes + "m"
-  return Math.floor(minutes / 60) + "h " + (minutes % 60) + "m"
+  if (minutes < 60) return `${minutes}m`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 
 function compactCount(value) {
   var count = parseInt(String(value || 0), 10) || 0
   if (count < 1000) return String(count)
-  if (count < 1000000) return (count / 1000).toFixed(count < 10000 ? 1 : 0) + "K"
-  return (count / 1000000).toFixed(1) + "M"
+  if (count < 1000000) return `${(count / 1000).toFixed(count < 10000 ? 1 : 0)}K`
+  return `${(count / 1000000).toFixed(1)}M`
 }
 
 // One chime per batch per source: ten uploads landing together should not
 // queue ten overlapping sounds.
+// biome-ignore lint/correctness/noUnusedVariables: Service.qml calls this library export.
 function soundsForBatch(fresh) {
+  var i
   var kinds = {}
   var list = arrayValues(fresh)
-  for (var i = 0; i < list.length; i++) kinds[String(list[i].kind || "")] = true
+  for (i = 0; i < list.length; i++) kinds[String(list[i].kind || "")] = true
   var out = []
   if (kinds["youtube"]) out.push("youtube")
   if (kinds["twitch"]) out.push("twitch")
@@ -158,7 +171,7 @@ function soundsForBatch(fresh) {
 
 function notificationTitle(item) {
   var name = String((item || {}).channelName || "Channel")
-  return (item || {}).kind === "twitch" ? name + " is live" : name
+  return (item || {}).kind === "twitch" ? `${name} is live` : name
 }
 
 function notificationBody(item) {
@@ -169,11 +182,12 @@ function notificationBody(item) {
   if (title) parts.push(title)
   var meta = []
   if (entry.game) meta.push(String(entry.game))
-  if (entry.viewers) meta.push(compactCount(entry.viewers) + " watching")
+  if (entry.viewers) meta.push(`${compactCount(entry.viewers)} watching`)
   if (meta.length) parts.push(meta.join(" · "))
   return parts.join("\n")
 }
 
+// biome-ignore lint/correctness/noUnusedVariables: Service.qml calls this library export.
 function notifyCommand(helper, item, options) {
   var settings = options || {}
   var command = [helper,

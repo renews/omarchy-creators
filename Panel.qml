@@ -62,6 +62,7 @@ Panel {
       cookieBrowser: String(setting("cookieBrowser", "auto")),
       twitchClientId: Model.twitchClientId(setting("twitchClientId", "")),
       soundEnabled: setting("soundEnabled", true) !== false,
+      soundVolume: setting("soundVolume", 100),
       notificationsEnabled: setting("notificationsEnabled", true) !== false,
       notificationTimeoutSec: parseInt(String(setting("notificationTimeoutSec", 12)), 10),
       clickAction: String(setting("clickAction", "Browser")),
@@ -844,6 +845,49 @@ Panel {
               checked: root.setting("soundEnabled", true) !== false
               onClicked: root.persistSetting("soundEnabled",
                 !(root.setting("soundEnabled", true) !== false))
+            }
+
+            Column {
+              width: parent.width
+              spacing: Style.space(4)
+              enabled: root.setting("soundEnabled", true) !== false
+              opacity: enabled ? 1 : 0.5
+
+              Item {
+                width: parent.width
+                implicitHeight: volumeLabel.implicitHeight
+
+                Text {
+                  id: volumeLabel
+                  anchors.left: parent.left
+                  text: "Volume"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+                Text {
+                  anchors.right: parent.right
+                  text: Math.round((chimeVolume.dragging ? chimeVolume.liveValue
+                    : Model.normalizeChimeVolume(root.setting("soundVolume", 100)) * 100)) + "%"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              PanelSlider {
+                id: chimeVolume
+                bar: root.bar
+                width: parent.width
+                minimum: 0
+                maximum: 100
+                step: 5
+                integer: true
+                value: Math.round(Model.normalizeChimeVolume(root.setting("soundVolume", 100)) * 100)
+                onReleased: function(value) {
+                  root.persistSetting("soundVolume", Math.round(value))
+                }
+              }
             }
 
             Row {
