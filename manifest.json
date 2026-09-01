@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "renews.creators",
   "name": "Omarchy Creators",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "renews",
   "license": "MIT",
   "description": "Alerts for new YouTube uploads and Twitch channels going live, for the channels you switch on. Plays a chime, raises a desktop notification, and opens the video either in the browser or in a snap-positioned picture-in-picture window.",
