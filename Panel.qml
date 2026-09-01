@@ -885,7 +885,9 @@ Panel {
                 integer: true
                 value: Math.round(Model.normalizeChimeVolume(root.setting("soundVolume", 100)) * 100)
                 onReleased: function(value) {
-                  root.persistSetting("soundVolume", Math.round(value))
+                  const volume = Math.round(value)
+                  root.persistSetting("soundVolume", volume)
+                  if (root.monitor) root.monitor.setSoundVolume(volume)
                 }
               }
             }

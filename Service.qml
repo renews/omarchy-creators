@@ -87,7 +87,7 @@ Item {
     cookieBrowser = String(next.cookieBrowser || "auto")
     twitchClientId = String(next.twitchClientId || "").trim()
     soundEnabled = next.soundEnabled !== false
-    soundVolume = Model.normalizeChimeVolume(next.soundVolume)
+    setSoundVolume(next.soundVolume)
     notificationsEnabled = next.notificationsEnabled !== false
     notificationTimeoutSec = Math.max(0, Math.min(120, parseInt(String(next.notificationTimeoutSec), 10) || 0))
     clickAction = String(next.clickAction || "Browser")
@@ -206,6 +206,10 @@ Item {
   // -------------------------------------------------------------------------
   // alerting
   // -------------------------------------------------------------------------
+
+  function setSoundVolume(value) {
+    soundVolume = Model.normalizeChimeVolume(value)
+  }
 
   function announce(fresh) {
     if (fresh.length === 0) return
