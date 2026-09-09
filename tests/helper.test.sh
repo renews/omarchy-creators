@@ -24,6 +24,7 @@ export XDG_STATE_HOME="$sandbox/state" XDG_CACHE_HOME="$sandbox/cache"
 
 bash -n "$PIP" || fail "creators-pip has a syntax error"
 bash -n "$ROOT/creators-notify" || fail "creators-notify has a syntax error"
+python3 "$ROOT/tests/notify.test.py" || fail "notification click checks failed"
 /usr/bin/env python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$HELPER" ||
   fail "creators has a syntax error"
 /usr/bin/env python3 "$ROOT/tests/state-io.test.py" ||

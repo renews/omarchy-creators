@@ -161,8 +161,8 @@ Everything is editable from Setup → Plugins, or inline in `shell.json`.
 ## Note on notification buttons
 
 The helper sends `browser` and `pip` as named notification actions, which mako
-and dunst draw as buttons. The Omarchy notification daemon invokes only the
-`default` action, so on Omarchy a click follows the `clickAction` setting. The
+and dunst draw as buttons. Omarchy uses a persistent click command that follows
+the `clickAction` setting; the helper also supplies the `default` action for compatibility. The
 Feed tab's right click is the always-available way to take the other route.
 
 ## Layout

@@ -3,8 +3,8 @@
 #
 # notify-send blocks while actions are on screen and prints the chosen action
 # key, so this script stays alive for the life of the notification and then acts
-# on the click itself. That keeps click handling out of the shell process: the
-# QML service fires this and forgets it.
+# on the click itself on other desktops. Omarchy uses a persistent command
+# hint so clicks also work after the sender exits or the shell reloads.
 #
 #   creators-notify --title T --body B --url URL [--icon PATH]
 #                 [--default browser|pip|none] [--timeout MS]
@@ -36,13 +36,11 @@ done
 
 open_browser() { [[ -n $url ]] && omarchy-launch-browser "$url"; }
 
-open_pip() {
-  [[ -n $url ]] || return 0
-  local args=("$here/creators-pip" open "$url" --title "$title")
-  [[ -n $pip_position ]] && args+=(--position "$pip_position")
-  [[ -n $pip_size ]] && args+=(--size "$pip_size")
-  "${args[@]}"
-}
+pip_args=("$here/creators-pip" open "$url" --title "$title")
+[[ -n $pip_position ]] && pip_args+=(--position "$pip_position")
+[[ -n $pip_size ]] && pip_args+=(--size "$pip_size")
+
+open_pip() { [[ -n $url ]] && "${pip_args[@]}"; }
 
 notify=(notify-send --app-name="Omarchy Creators" --urgency="$urgency" --expire-time="$timeout")
 [[ -n $icon && -f $icon ]] && notify+=(--icon="$icon")
@@ -52,7 +50,13 @@ notify=(notify-send --app-name="Omarchy Creators" --urgency="$urgency" --expire-
 # actions are drawn as buttons by daemons that support them (mako, dunst), so
 # they are sent as well and simply ignored here.
 if [[ -n $url ]]; then
-  [[ $default != none ]] && notify+=(--action="default=Open")
+  if [[ $default != none ]]; then
+    notify+=(--action="default=Open")
+    click_args=(omarchy-launch-browser "$url")
+    [[ $default == pip ]] && click_args=("${pip_args[@]}")
+    click_json=$(printf '%s\0' "${click_args[@]}" | jq -Rsc 'split("\u0000")[:-1]') || exit 1
+    notify+=(--hint="string:omarchy-exec-argv:$click_json")
+  fi
   notify+=(--action="browser=Open" --action="pip=PiP")
 fi
 
