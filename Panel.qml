@@ -83,23 +83,13 @@ Panel {
   }
 
   function persistSetting(name, value) {
-    if (!bar || !bar.shell || typeof bar.shell.mutateShellConfig !== "function") return
-    bar.shell.mutateShellConfig(function (config) {
-      const layout = config && config.bar ? config.bar.layout : null
-      if (!layout) return
-      const sections = ["left", "center", "right"]
-      for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
-        const entries = layout[sections[sectionIndex]]
-        if (!Array.isArray(entries)) continue
-        for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
-          const entry = entries[entryIndex]
-          if (entry && String(entry.id || "") === moduleName) {
-            entry[name] = value
-            return
-          }
-        }
-      }
-    })
+    if (!bar || !bar.shell || typeof bar.shell.updateEntryInline !== "function") return
+    // The scoped API replaces our entry, so preserve every existing setting.
+    const next = {}
+    for (const key in root.settings) next[key] = root.settings[key]
+    next[name] = value
+    root.settings = next
+    bar.shell.updateEntryInline(moduleName, next)
   }
 
   function toggleYoutube(channelId) {
