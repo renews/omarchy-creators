@@ -45,19 +45,25 @@ open_pip() { [[ -n $url ]] && "${pip_args[@]}"; }
 notify=(notify-send --app-name="Omarchy Creators" --urgency="$urgency" --expire-time="$timeout")
 [[ -n $icon && -f $icon ]] && notify+=(--icon="$icon")
 
-# "default" is the freedesktop key for a click on the notification body, and it
-# is the only action the Omarchy notification daemon invokes. The two named
-# actions are drawn as buttons by daemons that support them (mako, dunst), so
-# they are sent as well and simply ignored here.
+# Omarchy runs saved commands for the body and the buttons. Other notification
+# servers return an action key to this process, which must stay running.
 if [[ -n $url ]]; then
   if [[ $default != none ]]; then
-    notify+=(--action="default=Open")
     click_args=(omarchy-launch-browser "$url")
     [[ $default == pip ]] && click_args=("${pip_args[@]}")
     click_json=$(printf '%s\0' "${click_args[@]}" | jq -Rsc 'split("\u0000")[:-1]') || exit 1
     notify+=(--hint="string:omarchy-exec-argv:$click_json")
   fi
-  notify+=(--action="browser=Open" --action="pip=PiP")
+  if [[ $(omarchy-shell notifications ping 2>/dev/null) == ok ]]; then
+    browser_json=$(printf '%s\0' omarchy-launch-browser "$url" | jq -Rsc 'split("\u0000")[:-1]') || exit 1
+    pip_json=$(printf '%s\0' "${pip_args[@]}" | jq -Rsc 'split("\u0000")[:-1]') || exit 1
+    actions_json=$(jq -cn --argjson browser "$browser_json" --argjson pip "$pip_json" \
+      '[{label: "Open", argv: $browser}, {label: "PiP", argv: $pip}]') || exit 1
+    notify+=(--hint="string:omarchy-actions:$actions_json")
+  else
+    [[ $default != none ]] && notify+=(--action="default=Open")
+    notify+=(--action="browser=Open" --action="pip=PiP")
+  fi
 fi
 
 chosen=$("${notify[@]}" -- "$title" "$body" 2>/dev/null)
