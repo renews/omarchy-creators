@@ -138,6 +138,10 @@ Click the bar widget to open the panel.
 Right click the bar widget to check right now. With the panel focused, `r`
 checks now and `/` jumps to the search field.
 
+The search fields accept typed text, selection, and deletion. Clipboard paste
+and input-method composition are disabled. This prevents Qt from reading
+clipboard text automatically in the shared shell.
+
 The picture-in-picture window floats and stays pinned across workspaces. Drag it
 with `Super` + left mouse and resize it with `Super` + right mouse; the nine
 anchors in the Player tab are there for when you want it back in a corner.
@@ -183,11 +187,14 @@ Twitch token, the player's last placement); caches in
 ## Tests
 
 ```bash
-node tests/model.test.js     # pure logic
+bun tests/model.test.js      # pure logic
+bun tests/panel-settings.test.js
 ./tests/helper.test.sh       # helper JSON contract and input refusal
+./tests/search-field.test.sh # clipboard and keyboard checks; Qt development files required
 ```
 
-Neither touches the network, the compositor, or your real state directory.
+These checks do not change your saved settings. The search-field check uses
+an isolated clipboard.
 `tests/make-chimes.py` regenerates the bundled sounds.
 
 ## Licence

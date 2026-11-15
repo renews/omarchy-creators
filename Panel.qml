@@ -417,7 +417,7 @@ Panel {
               fontFamily: root.fontFamily
             }
 
-            TextField {
+            SearchField {
               id: youtubeSearch
               width: parent.width
               foreground: root.foreground
@@ -606,7 +606,7 @@ Panel {
                 fontFamily: root.fontFamily
               }
 
-              TextField {
+              SearchField {
                 id: twitchSearch
                 width: parent.width
                 foreground: root.foreground

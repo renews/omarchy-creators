@@ -4,6 +4,10 @@ import { runInNewContext } from "node:vm";
 
 const panel = readFileSync(new URL("../Panel.qml", import.meta.url), "utf8");
 const model = readFileSync(new URL("../CreatorsModel.js", import.meta.url), "utf8");
+for (const name of ["youtubeSearch", "twitchSearch"]) {
+  assert.match(panel, new RegExp(`SearchField\\s*\\{\\s*id: ${name}\\b`),
+    `${name} must use the guarded search field`);
+}
 const Model = runInNewContext(model.replace(/^\.pragma library\s*$/m, "") +
   "; ({ normalizeIds, toggleSelection, sortForPicker, channelKey })");
 
